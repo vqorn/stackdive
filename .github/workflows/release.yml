@@ -1,0 +1,81 @@
+name: Release
+
+# Builds binaries and attaches them to a GitHub release. Either push a tag
+# like v0.1.0, or run it by hand (Actions > Release > Run workflow) with a
+# version number; the tag and release are then created automatically.
+# The version must match the one in Cargo.toml.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version without the v, e.g. 0.1.0'
+        required: true
+
+env:
+  TAG: ${{ inputs.version && format('v{0}', inputs.version) || github.ref_name }}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            name: linux-x86_64
+          - os: ubuntu-22.04-arm
+            name: linux-arm64
+          - os: macos-latest
+            name: macos-universal
+          - os: windows-latest
+            name: windows-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - name: The tag matches Cargo.toml
+        shell: bash
+        run: |
+          VERSION="${TAG#v}"
+          grep -q "^version = \"$VERSION\"" Cargo.toml || { echo "Cargo.toml is not at version $VERSION"; exit 1; }
+      - name: Test
+        run: cargo test --release
+      - name: Build (Linux, Windows)
+        if: matrix.name != 'macos-universal'
+        run: cargo build --release
+      - name: Build (macOS, both chips in one binary)
+        if: matrix.name == 'macos-universal'
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          mkdir -p target/release
+          lipo -create -output target/release/stackdive \
+            target/aarch64-apple-darwin/release/stackdive \
+            target/x86_64-apple-darwin/release/stackdive
+      - name: Package (Linux, macOS)
+        if: matrix.os != 'windows-latest'
+        run: |
+          cp target/release/stackdive .
+          ./stackdive --version
+          tar czf "stackdive-${{ matrix.name }}.tar.gz" stackdive README.md LICENSE
+      - name: Package (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          Copy-Item target/release/stackdive.exe .
+          ./stackdive.exe --version
+          Compress-Archive -Path stackdive.exe, README.md, LICENSE -DestinationPath "stackdive-${{ matrix.name }}.zip"
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: stackdive ${{ env.TAG }}
+          target_commitish: ${{ github.sha }}
+          files: |
+            stackdive-${{ matrix.name }}.tar.gz
+            stackdive-${{ matrix.name }}.zip
+          fail_on_unmatched_files: false
